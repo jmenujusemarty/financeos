@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { type StorageBackend, uuidv7 } from "@financeos/core";
 import { Inject, Injectable, Logger, type OnModuleInit } from "@nestjs/common";
-import { and, asc, eq, gt, isNotNull, isNull, ne, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { WorkspaceContext } from "../../common/context.js";
 import { assertFound, badRequest, DomainError } from "../../common/errors.js";
 import { db, type Executor } from "../../db/index.js";
@@ -162,6 +162,20 @@ export class StorageService implements OnModuleInit {
       })
       .returning();
     return { ...(row as FileRow), duplicateOf: previous?.id ?? null };
+  }
+
+  /** Idempotent bank originals for API integrations, isolated by workspace and content hash. */
+  async saveStatement(ctx: WorkspaceContext, upload: { buffer: Buffer; filename: string; contentType: string }) {
+    if (upload.contentType.split(";")[0]?.trim().toLowerCase() !== "application/pdf"
+      || upload.buffer.subarray(0, 5).toString("ascii") !== "%PDF-") throw badRequest("Attach an original PDF statement", "invalid_statement_pdf");
+    if (upload.buffer.length > MAX_UPLOAD_BYTES) throw badRequest("Files can be at most 12 MB", "file_too_large");
+    const sha256 = createHash("sha256").update(upload.buffer).digest("hex");
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`${ctx.workspaceId}:${sha256}`}, 0))`);
+      const [previous] = await tx.select().from(files).where(and(eq(files.workspaceId, ctx.workspaceId), eq(files.sha256, sha256))).limit(1);
+      const saved = previous ?? await this.save(ctx, upload, "statement", ALLOWED_TYPES.pdf, tx);
+      return { id: saved.id, filename: saved.filename, contentType: saved.contentType, size: saved.size, sha256, duplicate: Boolean(previous) };
+    });
   }
 
   async meta(ctx: Pick<WorkspaceContext, "workspaceId">, id: string, exec: Executor = db): Promise<FileRow> {

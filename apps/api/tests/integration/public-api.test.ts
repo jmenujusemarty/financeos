@@ -85,6 +85,33 @@ function httpContext(request: Partial<AppRequest>): ExecutionContext {
   return { switchToHttp: () => ({ getRequest: () => request }) } as unknown as ExecutionContext;
 }
 
+describe("statement files through API keys", () => {
+  const upload = (key: string, bytes = "%PDF-1.4\nstatement-test", type = "application/pdf") => {
+    const form = new FormData();
+    form.set("file", new Blob([bytes], { type }), "statement.pdf");
+    return fetch(`${baseUrl}/v1/statement-files`, { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form });
+  };
+
+  it("requires write scope and deduplicates original PDFs within a workspace", async () => {
+    expect((await upload(readKey)).status).toBe(403);
+    const first = await upload(writeKey);
+    expect(first.status).toBe(201);
+    const saved = await json(first);
+    expect(saved.sha256).toMatch(/^[a-f0-9]{64}$/);
+    const repeated = await json(await upload(writeKey));
+    expect(repeated.id).toBe(saved.id);
+    const secondUser = await createUser("Other owner");
+    const otherKey = (await keys.create(secondUser.business, { name: "Other", scopes: ["read", "write"] })).key;
+    expect((await json(await upload(otherKey))).id).not.toBe(saved.id);
+  });
+
+  it("refuses missing files and content masquerading as PDF", async () => {
+    expect((await upload(writeKey, "<html>unsafe</html>")).status).toBe(400);
+    expect((await upload(writeKey, "%PDF-1.4", "text/html")).status).toBe(400);
+    expect((await call("/v1/statement-files", { method: "POST", key: writeKey, body: {} })).status).toBe(400);
+  });
+});
+
 describe("API keys", () => {
   it("shows the key once and stores only its hash", async () => {
     const created = await keys.create(user.business, { name: "CI", scopes: ["write"], expiresInDays: 30 });
