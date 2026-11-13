@@ -1,6 +1,6 @@
 import { apiKeyInput } from "@financeos/core";
 import { publicExpenseInput, publicRevenueInput, publicTransactionInput, publicTransactionQuery } from "@financeos/core/contracts/integrations-extra";
-import { Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Query, Res, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
 import type { Response } from "express";
 import type { z } from "zod";
 import type { WorkspaceContext } from "../../../common/context.js";
@@ -9,6 +9,9 @@ import { zod } from "../../../common/zod.js";
 import { ApiKeyGuard } from "./api-key.guard.js";
 import { ApiKeysService } from "./api-keys.service.js";
 import { PublicApiService } from "./public-api.service.js";
+import { uploadInterceptor } from "../../storage/files.controller.js";
+import { StorageService } from "../../storage/storage.service.js";
+import { badRequest } from "../../../common/errors.js";
 
 const uuidParam = new ParseUUIDPipe({ version: "7" });
 
@@ -44,7 +47,16 @@ export class PublicApiController {
   constructor(
     @Inject(PublicApiService) private readonly api: PublicApiService,
     @Inject(ApiKeysService) private readonly keys: ApiKeysService,
+    @Inject(StorageService) private readonly storage: StorageService,
   ) {}
+
+  /** Upload an original PDF once; attach the returned id to transactions. Requires write scope. */
+  @Post("statement-files")
+  @UseInterceptors(uploadInterceptor())
+  statementFile(@Ctx() ctx: WorkspaceContext, @UploadedFile() file: Express.Multer.File | undefined) {
+    if (!file) throw badRequest("Attach a file in the `file` field");
+    return this.storage.saveStatement(ctx, { buffer: file.buffer, filename: file.originalname, contentType: file.mimetype });
+  }
 
   /** The workspaces this key reaches; pick one with X-Workspace-Id (or ?workspace=) on any other call. */
   @Get("workspaces")
